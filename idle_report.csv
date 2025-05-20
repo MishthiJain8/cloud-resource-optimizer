@@ -1,0 +1,4 @@
+Instance ID,Type,State,Low Usage Days,Idle?
+i-0123abc,t2.micro,running,6,Yes
+i-0456def,t2.medium,running,0,No
+i-0789ghi,t2.micro,stopped,6,Yes
