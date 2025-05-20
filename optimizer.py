@@ -2,83 +2,87 @@ import boto3
 import pandas as pd
 from datetime import datetime, timedelta
 
+# Create AWS clients with passed credentials
+def create_clients(region, aws_access_key, aws_secret_key):
+    try:
+        session = boto3.Session(
+            aws_access_key_id=aws_access_key,
+            aws_secret_access_key=aws_secret_key,
+            region_name=region
+        )
+        ec2 = session.client("ec2")
+        cloudwatch = session.client("cloudwatch")
+        return ec2, cloudwatch
+    except Exception as e:
+        raise RuntimeError(f"Error creating AWS clients: {e}")
+
+# Fetch CPU metrics for an instance
 def get_cpu_metrics(cloudwatch, instance_id, start_time, end_time):
-    """Fetch average CPU utilization per day for the last N days."""
-    metrics = cloudwatch.get_metric_statistics(
-        Namespace='AWS/EC2',
-        MetricName='CPUUtilization',
-        Dimensions=[{'Name':'InstanceId', 'Value': instance_id}],
-        StartTime=start_time,
-        EndTime=end_time,
-        Period=86400,  # 1 day
-        Statistics=['Average']
-    )
-    datapoints = metrics.get('Datapoints', [])
-    # Sort datapoints by timestamp ascending
-    datapoints = sorted(datapoints, key=lambda x: x['Timestamp'])
-    # Extract average CPU values per day
-    cpu_avgs = [point['Average'] for point in datapoints]
-    return cpu_avgs
+    try:
+        metrics = cloudwatch.get_metric_statistics(
+            Namespace='AWS/EC2',
+            MetricName='CPUUtilization',
+            Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+            StartTime=start_time,
+            EndTime=end_time,
+            Period=86400,  # 1 day
+            Statistics=['Average']
+        )
+        datapoints = sorted(metrics.get('Datapoints', []), key=lambda x: x['Timestamp'])
+        return [point['Average'] for point in datapoints]
+    except Exception as e:
+        print(f"[ERROR] Failed to get CPU metrics for {instance_id}: {e}")
+        return []
 
-def get_idle_instances(region, idle_threshold, min_days):
-    """Returns a DataFrame of EC2 instances idle according to threshold and days."""
-    ec2 = boto3.client('ec2', region_name=region)
-    cloudwatch = boto3.client('cloudwatch', region_name=region)
+# Find idle instances based on CPU threshold and min days idle
+def get_idle_instances(region, idle_threshold=10.0, min_days=5, aws_access_key=None, aws_secret_key=None):
+    ec2, cloudwatch = create_clients(region, aws_access_key, aws_secret_key)
 
-    # Describe all running instances
-    response = ec2.describe_instances(
-        Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
-    )
+    response = ec2.describe_instances(Filters=[
+        {'Name': 'instance-state-name', 'Values': ['running']}
+    ])
+
+    end_time = datetime.utcnow()
+    start_time = end_time - timedelta(days=7)
 
     instances_data = []
-    end_time = datetime.utcnow()
-    start_time = end_time - timedelta(days=7)  # Check last 7 days
 
     for reservation in response['Reservations']:
         for instance in reservation['Instances']:
             instance_id = instance['InstanceId']
             instance_type = instance['InstanceType']
-            state = instance['State']['Name']
 
             cpu_avgs = get_cpu_metrics(cloudwatch, instance_id, start_time, end_time)
             low_usage_days = sum(cpu < idle_threshold for cpu in cpu_avgs)
-
             is_idle = low_usage_days >= min_days
 
             instances_data.append({
                 "InstanceId": instance_id,
                 "InstanceType": instance_type,
-                "State": state,
                 "LowUsageDays": low_usage_days,
                 "Idle": "Yes" if is_idle else "No"
             })
 
     df = pd.DataFrame(instances_data)
-
     if df.empty:
-        # Return empty DataFrame with expected columns to avoid KeyError
-        return pd.DataFrame(columns=["InstanceId", "InstanceType", "State", "LowUsageDays", "Idle"])
+        return pd.DataFrame(columns=["InstanceId", "InstanceType", "LowUsageDays", "Idle"])
 
-    # Debug: print columns to help debug issues
-    print("Columns in DataFrame:", df.columns.tolist())
+    return df[df["Idle"] == "Yes"]
 
-    # Filter only idle instances
-    return df[df['Idle'] == "Yes"]
-
-def stop_instances(instance_ids, region):
-    """Stop the given list of EC2 instance IDs and return logs."""
-    ec2 = boto3.client('ec2', region_name=region)
+# Stop given EC2 instances
+def stop_instances(region, instance_ids, aws_access_key=None, aws_secret_key=None):
+    ec2, _ = create_clients(region, aws_access_key, aws_secret_key)
     logs = []
 
     if not instance_ids:
-        logs.append("[INFO] No instances to stop.")
+        logs.append("[INFO] No idle instances to stop.")
         return logs
 
     try:
         ec2.stop_instances(InstanceIds=instance_ids)
         for iid in instance_ids:
-            logs.append(f"[ACTION] Stopped instance {iid}")
+            logs.append(f"[ACTION] Stopped instance: {iid}")
     except Exception as e:
-        logs.append(f"[ERROR] Failed to stop instances: {str(e)}")
+        logs.append(f"[ERROR] Failed to stop instances: {e}")
 
     return logs
